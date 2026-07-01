@@ -1,24 +1,3 @@
-/**
- * Alert Webhook Receiver
- * -----------------------
- * Single endpoint set that receives alerts from:
- *   - TradingView (native webhook alerts)
- *   - Your Gmail Apps Script (MarketInOut email forwarder)
- *
- * For every alert it:
- *   1. Responds 200 immediately (required so TradingView doesn't mark it failed)
- *   2. Logs it to alerts.json (viewable at /dashboard)
- *   3. Fires SMS and/or a phone call via Twilio, based on payload.priority
- *
- * ENV VARS REQUIRED (set in .env locally, or in Railway/Render's dashboard):
- *   SHARED_SECRET        - must match the secret sent by TradingView/Apps Script
- *   TWILIO_ACCOUNT_SID
- *   TWILIO_AUTH_TOKEN
- *   TWILIO_FROM_NUMBER    - your Twilio number, e.g. +18005551234
- *   ALERT_TO_NUMBER       - your personal phone number, e.g. +19785551234
- *   PORT                  - optional, defaults to 3000
- */
-
 require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
@@ -33,7 +12,6 @@ const DATA_FILE = path.join(__dirname, 'data', 'alerts.json');
 
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-// --- Storage helpers (simple JSON file; swap for a real DB later if you outgrow this) ---
 function ensureDataFile() {
   const dir = path.dirname(DATA_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -47,25 +25,21 @@ function loadAlerts() {
 
 function saveAlert(entry) {
   const alerts = loadAlerts();
-  alerts.unshift(entry); // newest first
-  fs.writeFileSync(DATA_FILE, JSON.stringify(alerts.slice(0, 500), null, 2)); // keep last 500
+  alerts.unshift(entry);
+  fs.writeFileSync(DATA_FILE, JSON.stringify(alerts.slice(0, 500), null, 2));
 }
 
-// --- Priority logic ---
-// If the payload already specifies a priority (our Apps Script sets this), use it.
-// Otherwise fall back to a score threshold (useful for TradingView Pine alerts with a "score" field).
 function resolvePriority(payload) {
   if (payload.priority) return payload.priority;
   if (typeof payload.score === 'number') {
     return payload.score >= 75 ? 'call' : 'sms';
   }
-  return 'sms'; // safe default — never silently drop a real alert
+  return 'sms';
 }
 
-// --- Twilio actions ---
 async function sendSms(bodyText) {
   return twilioClient.messages.create({
-    body: bodyText.slice(0, 1500), // SMS providers truncate very long bodies anyway
+    body: bodyText.slice(0, 1500),
     from: process.env.TWILIO_FROM_NUMBER,
     to: process.env.ALERT_TO_NUMBER
   });
@@ -80,7 +54,6 @@ async function makeCall(spokenText) {
   });
 }
 
-// --- Message formatting ---
 function formatMessage(payload) {
   if (payload.format === 'trade_alert') {
     return `Trade Alert: ${payload.symbol || '?'} — ${payload.condition || ''} (${payload.timeframe || ''}). ${payload.comment || ''}`.trim();
@@ -89,14 +62,12 @@ function formatMessage(payload) {
     const symbols = (payload.matches || []).map(m => m.symbol).join(', ');
     return `Screen Alert (${payload.screen_name || 'unnamed'}): ${symbols || 'see details'}`;
   }
-  // TradingView-style JSON alert
   if (payload.ticker || payload.symbol) {
     return `${payload.action || 'Alert'}: ${payload.ticker || payload.symbol} @ ${payload.price || payload.close || '?'}${payload.strategy ? ' — ' + payload.strategy : ''}`;
   }
   return payload.message || payload.subject || 'New trading alert';
 }
 
-// --- Shared handler for both sources ---
 async function handleAlert(req, res, sourceLabel) {
   const payload = req.body || {};
 
@@ -105,7 +76,6 @@ async function handleAlert(req, res, sourceLabel) {
     return res.status(401).send('unauthorized');
   }
 
-  // Respond immediately — TradingView times out fast, and Twilio calls take a moment.
   res.status(200).send('ok');
 
   const priority = resolvePriority(payload);
@@ -139,11 +109,9 @@ async function handleAlert(req, res, sourceLabel) {
   saveAlert(logEntry);
 }
 
-// --- Routes ---
 app.post('/webhook/tradingview', (req, res) => handleAlert(req, res, 'TradingView'));
 app.post('/webhook/email', (req, res) => handleAlert(req, res, 'MarketInOut/Gmail'));
 
-// Simple dashboard to see everything that's come through
 app.get('/dashboard', (req, res) => {
   const alerts = loadAlerts();
   const rows = alerts.map(a => `
@@ -180,5 +148,41 @@ app.get('/dashboard', (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('Alert receiver is running. See /dashboard for logged alerts.'));
+
+app.get('/privacy', (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Privacy Policy</title>
+      <style>body{font-family:sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;}</style>
+      </head>
+      <body>
+        <h1>Privacy Policy</h1>
+        <p>This application ("the Service") sends automated SMS text messages and phone calls to a single, pre-configured phone number belonging to the account owner, for the sole purpose of delivering personal trading and stock-alert notifications generated by the account owner's own trading tools (TradingView and MarketInOut).</p>
+        <p>No mobile phone number or personal data collected through this Service is shared, sold, rented, or otherwise disclosed to any third party, affiliate, or marketing partner, at any time, for any purpose.</p>
+        <p>The only phone number that receives messages from this Service is the number configured directly by the account owner. This Service does not collect phone numbers from any other individual, and does not offer public sign-up.</p>
+        <p>Message frequency varies based on market activity; up to approximately 20 messages per day during active market hours. Message and data rates may apply.</p>
+        <p>To stop receiving messages, the account owner may reply STOP at any time, or disable the alert configuration directly within the Service.</p>
+        <p>Contact: the account owner, via the phone number associated with this Service.</p>
+      </body>
+    </html>
+  `);
+});
+
+app.get('/terms', (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Terms & Conditions</title>
+      <style>body{font-family:sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;}</style>
+      </head>
+      <body>
+        <h1>Terms & Conditions</h1>
+        <p>This Service is a personal, single-user notification tool. It sends SMS text messages and phone calls only to the phone number the account owner has configured, for the purpose of relaying trading alerts the account owner generated from their own tools (TradingView and MarketInOut).</p>
+        <p>This is not a commercial or public messaging service. No other individual can sign up to receive messages through this Service.</p>
+        <p>Message frequency varies based on market activity; up to approximately 20 messages per day during active market hours. Message and data rates may apply. Reply STOP to opt out at any time; reply HELP for support.</p>
+        <p>By configuring this Service with their own phone number, the account owner consents to receive these automated messages and calls.</p>
+      </body>
+    </html>
+  `);
+});
 
 app.listen(PORT, () => console.log(`Alert receiver listening on port ${PORT}`));
